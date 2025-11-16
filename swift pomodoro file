@@ -1,0 +1,692 @@
+import SwiftUI
+
+// MARK: - Models
+struct Task: Identifiable, Codable {
+    let id: UUID
+    var name: String
+    var completed: Bool
+    
+    init(id: UUID = UUID(), name: String, completed: Bool = false) {
+        self.id = id
+        self.name = name
+        self.completed = completed
+    }
+}
+
+struct Session: Identifiable, Codable {
+    let id: UUID
+    let taskName: String?
+    let duration: Int
+    let timestamp: Date
+    
+    var dateString: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy"
+        return formatter.string(from: timestamp)
+    }
+}
+
+// MARK: - Main App
+@main
+struct PomodoroApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
+
+// MARK: - Content View
+struct ContentView: View {
+    @StateObject private var viewModel = PomodoroViewModel()
+    
+    var body: some View {
+        ZStack {
+            Color.white.ignoresSafeArea()
+            
+            VStack(spacing: 0) {
+                // Main Content
+                TabView(selection: $viewModel.currentTab) {
+                    DashboardView(viewModel: viewModel)
+                        .tag(0)
+                    
+                    TimerView(viewModel: viewModel)
+                        .tag(1)
+                    
+                    TasksView(viewModel: viewModel)
+                        .tag(2)
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                
+                // Bottom Navigation
+                BottomNavigationView(selectedTab: $viewModel.currentTab)
+            }
+        }
+    }
+}
+
+// MARK: - View Model
+class PomodoroViewModel: ObservableObject {
+    @Published var currentTab: Int = 1
+    @Published var timeLeft: Int = 25 * 60
+    @Published var isRunning: Bool = false
+    @Published var mode: TimerMode = .focus
+    @Published var tasks: [Task] = []
+    @Published var sessions: [Session] = []
+    @Published var currentTask: Task?
+    @Published var showAddTask: Bool = false
+    
+    private var timer: Timer?
+    
+    enum TimerMode {
+        case focus, breakTime
+    }
+    
+    init() {
+        loadData()
+    }
+    
+    func toggleTimer() {
+        isRunning.toggle()
+        
+        if isRunning {
+            startTimer()
+        } else {
+            stopTimer()
+        }
+    }
+    
+    private func startTimer() {
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            
+            if self.timeLeft > 0 {
+                self.timeLeft -= 1
+            } else {
+                self.handleTimerComplete()
+            }
+        }
+    }
+    
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    private func handleTimerComplete() {
+        stopTimer()
+        isRunning = false
+        
+        if mode == .focus {
+            // Log session
+            let session = Session(
+                id: UUID(),
+                taskName: currentTask?.name,
+                duration: 25,
+                timestamp: Date()
+            )
+            sessions.append(session)
+            saveSessions()
+            
+            // Switch to break
+            mode = .breakTime
+            timeLeft = 5 * 60
+        } else {
+            // Switch back to focus
+            mode = .focus
+            timeLeft = 25 * 60
+        }
+    }
+    
+    func resetTimer() {
+        stopTimer()
+        isRunning = false
+        timeLeft = mode == .focus ? 25 * 60 : 5 * 60
+    }
+    
+    func switchMode() {
+        stopTimer()
+        isRunning = false
+        
+        if mode == .focus {
+            mode = .breakTime
+            timeLeft = 5 * 60
+        } else {
+            mode = .focus
+            timeLeft = 25 * 60
+        }
+    }
+    
+    func addTask(name: String) {
+        let task = Task(name: name)
+        tasks.append(task)
+        saveTasks()
+    }
+    
+    func deleteTask(_ task: Task) {
+        tasks.removeAll { $0.id == task.id }
+        saveTasks()
+    }
+    
+    func getTodaySessions() -> [Session] {
+        let today = Date()
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy"
+        let todayString = formatter.string(from: today)
+        
+        return sessions.filter { $0.dateString == todayString }
+    }
+    
+    func getTotalMinutes() -> Int {
+        return getTodaySessions().reduce(0) { $0 + $1.duration }
+    }
+    
+    func getWeeklyData() -> [(day: String, count: Int)] {
+        var data: [(String, Int)] = []
+        let calendar = Calendar.current
+        
+        for i in (0..<7).reversed() {
+            if let date = calendar.date(byAdding: .day, value: -i, to: Date()) {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "MM/dd/yyyy"
+                let dateString = formatter.string(from: date)
+                
+                let dayFormatter = DateFormatter()
+                dayFormatter.dateFormat = "d"
+                let dayNumber = dayFormatter.string(from: date)
+                
+                let count = sessions.filter { $0.dateString == dateString }.count
+                data.append((dayNumber, count))
+            }
+        }
+        
+        return data
+    }
+    
+    // MARK: - Persistence
+    private func loadData() {
+        if let tasksData = UserDefaults.standard.data(forKey: "tasks"),
+           let decodedTasks = try? JSONDecoder().decode([Task].self, from: tasksData) {
+            tasks = decodedTasks
+        }
+        
+        if let sessionsData = UserDefaults.standard.data(forKey: "sessions"),
+           let decodedSessions = try? JSONDecoder().decode([Session].self, from: sessionsData) {
+            sessions = decodedSessions
+        }
+    }
+    
+    private func saveTasks() {
+        if let encoded = try? JSONEncoder().encode(tasks) {
+            UserDefaults.standard.set(encoded, forKey: "tasks")
+        }
+    }
+    
+    private func saveSessions() {
+        if let encoded = try? JSONEncoder().encode(sessions) {
+            UserDefaults.standard.set(encoded, forKey: "sessions")
+        }
+    }
+}
+
+// MARK: - Timer View
+struct TimerView: View {
+    @ObservedObject var viewModel: PomodoroViewModel
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 40) {
+                // Header
+                VStack(spacing: 20) {
+                    Text("POMODORO")
+                        .font(.system(size: 40, weight: .bold))
+                        .foregroundColor(.black)
+                    
+                    if let task = viewModel.currentTask {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(Color.white)
+                                .frame(width: 8, height: 8)
+                            
+                            Text(task.name)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 12)
+                        .background(Color.black)
+                        .cornerRadius(25)
+                    }
+                }
+                .padding(.top, 40)
+                
+                // Timer Circle
+                VStack(spacing: 30) {
+                    ZStack {
+                        Circle()
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 20)
+                            .frame(width: 280, height: 280)
+                        
+                        Circle()
+                            .trim(from: 0, to: progress)
+                            .stroke(Color.black, style: StrokeStyle(lineWidth: 20, lineCap: .round))
+                            .frame(width: 280, height: 280)
+                            .rotationEffect(.degrees(-90))
+                            .animation(.linear, value: viewModel.timeLeft)
+                        
+                        Text(timeString)
+                            .font(.system(size: 64, weight: .bold))
+                            .foregroundColor(.black)
+                    }
+                    
+                    // Progress Dots
+                    HStack(spacing: 12) {
+                        ForEach(0..<4, id: \.self) { index in
+                            Circle()
+                                .fill(index < viewModel.getTodaySessions().count % 4 ? Color.black : Color.gray.opacity(0.3))
+                                .frame(width: 16, height: 16)
+                        }
+                    }
+                }
+                
+                // Play Button
+                Button(action: viewModel.toggleTimer) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.black)
+                            .frame(width: 96, height: 96)
+                            .shadow(color: .black.opacity(0.3), radius: 10, x: 0, y: 4)
+                        
+                        Image(systemName: viewModel.isRunning ? "pause.fill" : "play.fill")
+                            .font(.system(size: 40))
+                            .foregroundColor(.white)
+                            .offset(x: viewModel.isRunning ? 0 : 3)
+                    }
+                }
+                
+                // Bottom Controls
+                HStack(spacing: 24) {
+                    Button(action: { viewModel.currentTab = 2 }) {
+                        Circle()
+                            .fill(Color.black)
+                            .frame(width: 64, height: 64)
+                            .overlay(
+                                Image(systemName: "list.bullet")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(.white)
+                            )
+                    }
+                    
+                    Button(action: viewModel.resetTimer) {
+                        Circle()
+                            .stroke(Color.black, lineWidth: 4)
+                            .frame(width: 64, height: 64)
+                            .overlay(
+                                Image(systemName: "clock")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(.black)
+                            )
+                    }
+                    
+                    Button(action: viewModel.switchMode) {
+                        Circle()
+                            .fill(Color.black)
+                            .frame(width: 64, height: 64)
+                            .overlay(
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(.white)
+                            )
+                    }
+                }
+                .padding(.bottom, 40)
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+    
+    private var timeString: String {
+        let minutes = viewModel.timeLeft / 60
+        let seconds = viewModel.timeLeft % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+    
+    private var progress: CGFloat {
+        let total = viewModel.mode == .focus ? 25 * 60 : 5 * 60
+        return CGFloat(total - viewModel.timeLeft) / CGFloat(total)
+    }
+}
+
+// MARK: - Dashboard View
+struct DashboardView: View {
+    @ObservedObject var viewModel: PomodoroViewModel
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("DASHBOARD")
+                    .font(.system(size: 40, weight: .bold))
+                    .foregroundColor(.black)
+                    .padding(.top, 40)
+                
+                // Daily Analytics
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Daily Analytics")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.white)
+                    
+                    HStack(alignment: .bottom, spacing: 16) {
+                        ForEach(viewModel.getWeeklyData(), id: \.day) { data in
+                            VStack(spacing: 12) {
+                                Rectangle()
+                                    .fill(Color.white)
+                                    .frame(width: 40, height: max(CGFloat(data.count) * 30, 20))
+                                    .cornerRadius(8, corners: [.topLeft, .topRight])
+                                
+                                Text(data.day)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                    }
+                    .frame(height: 160)
+                    .frame(maxWidth: .infinity)
+                }
+                .padding(32)
+                .background(Color.black)
+                .cornerRadius(24)
+                
+                // Stats Grid
+                HStack(spacing: 24) {
+                    // Progress Circle
+                    VStack {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 10)
+                                .frame(width: 112, height: 112)
+                            
+                            Circle()
+                                .trim(from: 0, to: CGFloat(viewModel.getTodaySessions().count % 8) / 8)
+                                .stroke(Color.white, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                                .frame(width: 112, height: 112)
+                                .rotationEffect(.degrees(-90))
+                            
+                            Text("\(Int((Double(viewModel.getTodaySessions().count % 8) / 8) * 100))%")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(.white)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(32)
+                    .background(Color.black)
+                    .cornerRadius(24)
+                    
+                    // Focus Time
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "chart.line.uptrend.xyaxis")
+                                .font(.system(size: 16))
+                            Text("Focus Time")
+                                .font(.system(size: 14, weight: .bold))
+                        }
+                        
+                        Text("\(viewModel.getTotalMinutes())")
+                            .font(.system(size: 40, weight: .bold))
+                        
+                        Text("minutes")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.gray)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 24)
+                            .stroke(Color.black, lineWidth: 4)
+                    )
+                }
+                
+                // Add Tasks Button
+                Button(action: { viewModel.showAddTask = true }) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 24))
+                        Text("Add Tasks")
+                            .font(.system(size: 18, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                    .background(Color.black)
+                    .cornerRadius(16)
+                }
+                
+                // My Tasks
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("My tasks")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.black)
+                    
+                    ForEach(viewModel.tasks) { task in
+                        HStack {
+                            HStack(spacing: 16) {
+                                Circle()
+                                    .fill(Color.white)
+                                    .frame(width: 12, height: 12)
+                                
+                                Text(task.name)
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(.white)
+                            }
+                            
+                            Spacer()
+                            
+                            Button(action: { viewModel.deleteTask(task) }) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 20))
+                                    .foregroundColor(.white)
+                            }
+                        }
+                        .padding(20)
+                        .background(Color.black)
+                        .cornerRadius(16)
+                    }
+                }
+                .padding(.bottom, 40)
+            }
+            .padding(.horizontal, 24)
+        }
+        .sheet(isPresented: $viewModel.showAddTask) {
+            AddTaskView(viewModel: viewModel)
+        }
+    }
+}
+
+// MARK: - Tasks View
+struct TasksView: View {
+    @ObservedObject var viewModel: PomodoroViewModel
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("Tasks")
+                    .font(.system(size: 40, weight: .bold))
+                    .foregroundColor(.black)
+                    .padding(.top, 40)
+                
+                ForEach(viewModel.tasks) { task in
+                    Button(action: {
+                        viewModel.currentTask = task
+                        viewModel.currentTab = 1
+                    }) {
+                        HStack {
+                            HStack(spacing: 16) {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.black)
+                                    .frame(width: 20, height: 20)
+                                
+                                Text(task.name)
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(.black)
+                            }
+                            
+                            Spacer()
+                            
+                            Image(systemName: task.completed ? "checkmark.square.fill" : "square")
+                                .font(.system(size: 24))
+                                .foregroundColor(.black)
+                        }
+                        .padding(20)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(Color.black, lineWidth: 4)
+                        )
+                    }
+                }
+                
+                if viewModel.tasks.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("No tasks yet")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.gray)
+                        
+                        Text("Add a task to get started!")
+                            .font(.system(size: 14))
+                            .foregroundColor(.gray)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 48)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 40)
+        }
+    }
+}
+
+// MARK: - Add Task View
+struct AddTaskView: View {
+    @ObservedObject var viewModel: PomodoroViewModel
+    @Environment(\.dismiss) var dismiss
+    @State private var taskName = ""
+    
+    var body: some View {
+        VStack(spacing: 24) {
+            Text("Add New Task")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundColor(.black)
+            
+            TextField("Task name...", text: $taskName)
+                .font(.system(size: 18, weight: .semibold))
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.black, lineWidth: 4)
+                )
+            
+            HStack(spacing: 16) {
+                Button(action: { dismiss() }) {
+                    Text("Cancel")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.black, lineWidth: 4)
+                        )
+                }
+                
+                Button(action: {
+                    if !taskName.isEmpty {
+                        viewModel.addTask(name: taskName)
+                        dismiss()
+                    }
+                }) {
+                    Text("Add Task")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(Color.black)
+                        .cornerRadius(12)
+                }
+            }
+        }
+        .padding(32)
+    }
+}
+
+// MARK: - Bottom Navigation
+struct BottomNavigationView: View {
+    @Binding var selectedTab: Int
+    
+    var body: some View {
+        HStack(spacing: 0) {
+            NavigationButton(icon: "house.fill", title: "Dashboard", isSelected: selectedTab == 0) {
+                selectedTab = 0
+            }
+            
+            NavigationButton(icon: "clock.fill", title: "Timer", isSelected: selectedTab == 1) {
+                selectedTab = 1
+            }
+            
+            NavigationButton(icon: "list.bullet", title: "Tasks", isSelected: selectedTab == 2) {
+                selectedTab = 2
+            }
+        }
+        .padding(.vertical, 16)
+        .background(Color.white)
+        .overlay(
+            Rectangle()
+                .fill(Color.black)
+                .frame(height: 4),
+            alignment: .top
+        )
+    }
+}
+
+struct NavigationButton: View {
+    let icon: String
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 28))
+                
+                Text(title)
+                    .font(.system(size: 12, weight: .bold))
+            }
+            .foregroundColor(isSelected ? .white : .gray)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(isSelected ? Color.black : Color.clear)
+            .cornerRadius(16)
+        }
+        .padding(.horizontal, 8)
+    }
+}
+
+// MARK: - Extensions
+extension View {
+    func cornerRadius(_ radius: CGFloat, corners: UIRectCorner) -> some View {
+        clipShape(RoundedCorner(radius: radius, corners: corners))
+    }
+}
+
+struct RoundedCorner: Shape {
+    var radius: CGFloat = .infinity
+    var corners: UIRectCorner = .allCorners
+    
+    func path(in rect: CGRect) -> Path {
+        let path = UIBezierPath(
+            roundedRect: rect,
+            byRoundingCorners: corners,
+            cornerRadii: CGSize(width: radius, height: radius)
+        )
+        return Path(path.cgPath)
+    }
+}
